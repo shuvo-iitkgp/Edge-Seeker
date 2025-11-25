@@ -2,10 +2,63 @@
 
 import torch
 import torch.nn.functional as F
-from typing import Dict, Any, Tuple
+from typing import Dict, Iterable, Tuple, Optional , Any
 from .features import build_features
 from .models import SmallGCN, DeepGCN
 from .config import DEVICE
+# hetero_training.py or inside training.py
+
+
+EdgeType = Tuple[str, str, str]
+
+def make_hetero_gbb_api_for_model(
+    model,
+    edge_index_dict: Dict[EdgeType, torch.Tensor],
+    target_ntype: str,
+):
+    """
+    Build a GBB API for a heterogeneous GNN.
+
+    model(x_dict, edge_index_dict) must return a dict of logits per node type.
+    Only the logits for target_ntype are queried.
+
+    rel_mask can be used to keep a subset of edge types for relation masking.
+    """
+
+    def gbb_api(
+        target_ntype: str,
+        node_ids: torch.Tensor,
+        x_dict_query: Dict[str, torch.Tensor],
+        rel_mask: Optional[Iterable[EdgeType]] = None,
+    ):
+        if isinstance(node_ids, (list, tuple)):
+            node_ids_t = torch.tensor(node_ids, dtype=torch.long, device=DEVICE)
+        else:
+            node_ids_t = node_ids.to(DEVICE)
+
+        # Move features to device
+        xq = {k: v.to(DEVICE) for k, v in x_dict_query.items()}
+
+        # Apply relation mask if given
+        if rel_mask is None:
+            ei_dict = {k: v.to(DEVICE) for k, v in edge_index_dict.items()}
+        else:
+            rel_mask_set = set(rel_mask)
+            ei_dict = {
+                k: v.to(DEVICE)
+                for k, v in edge_index_dict.items()
+                if k in rel_mask_set
+            }
+
+        model.eval()
+        with torch.no_grad():
+            logits_dict = model(xq, ei_dict)
+            logits_target = logits_dict[target_ntype]
+            logits_sel = logits_target[node_ids_t]
+
+        return logits_sel.detach().cpu()
+
+    return gbb_api
 
 
 def train_private_gcn(data, num_classes: int = 2,
